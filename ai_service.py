@@ -165,7 +165,7 @@ class AIService:
             temperature=0.2,
         )
         
-        tools = [{"google_search": {}}] if search_grounding else None
+        tools = ["google_search_retrieval"] if search_grounding else None
         
         try:
             model = genai.GenerativeModel(model_name=self.model_name, tools=tools)
