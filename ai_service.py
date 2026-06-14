@@ -19,6 +19,11 @@ try:
 except ImportError:
     anthropic = None
 
+try:
+    import openai
+except ImportError:
+    openai = None
+
 
 class AnswerOption(BaseModel):
     text: str = Field(description="Texto de la opción de respuesta.")
@@ -53,11 +58,27 @@ class AIService:
                 genai.configure(api_key=self.api_key)
             else:
                 logger.warning("El paquete 'google-generativeai' no está instalado.")
+                
         elif self.provider == "Anthropic Claude":
             if anthropic is not None:
                 self.claude_client = anthropic.Anthropic(api_key=self.api_key)
             else:
                 logger.warning("El paquete 'anthropic' no está instalado.")
+                
+        elif self.provider in ["Groq (Llama/Gemma)", "OpenRouter (Modelos Libres)"]:
+            if openai is not None:
+                if self.provider == "Groq (Llama/Gemma)":
+                    self.openai_client = openai.OpenAI(
+                        base_url="https://api.groq.com/openai/v1",
+                        api_key=self.api_key
+                    )
+                else:  # OpenRouter
+                    self.openai_client = openai.OpenAI(
+                        base_url="https://openrouter.ai/api/v1",
+                        api_key=self.api_key
+                    )
+            else:
+                logger.warning("El paquete 'openai' no está instalado.")
 
     def generate_quiz(
         self, 
@@ -67,9 +88,8 @@ class AIService:
         generate_new_questions: bool = False
     ) -> List[Dict[str, Any]]:
         """
-        Uses Gemini or Claude to parse the document text and return a list of structured questions.
+        Uses the selected provider to parse text and return structured questions.
         """
-        # Select the target types based on user selection
         type_instruction = ""
         if question_type == "Opción Múltiple":
             type_instruction = "Genera únicamente preguntas de opción múltiple ('multichoice'). Cada una debe tener al menos 4 opciones."
@@ -78,7 +98,6 @@ class AIService:
         else:
             type_instruction = "Genera una combinación de preguntas de opción múltiple ('multichoice') y abiertas de tipo ensayo ('essay'). Asegúrate de que las de opción múltiple tengan al menos 4 opciones."
 
-        # Define behavior (extraction vs generation)
         behavior_instruction = ""
         if generate_new_questions:
             behavior_instruction = (
@@ -124,14 +143,15 @@ class AIService:
 
         if search_grounding and self.provider == "Google Gemini":
             prompt += "\nUtiliza tu herramienta de búsqueda en Google (Google Search) para encontrar referencias bibliográficas académicas reales y libros existentes que sirvan de fuente para el tema de las preguntas generadas, e incorpóralas en la retroalimentación."
-        elif search_grounding and self.provider == "Anthropic Claude":
+        else:
             prompt += "\nUtiliza tu conocimiento interno actualizado para buscar y citar libros de texto reales e importantes de la disciplina académica como fuente para las preguntas."
 
-        # Executing call based on selected provider
         if self.provider == "Google Gemini":
             return self._call_gemini(prompt, search_grounding)
         elif self.provider == "Anthropic Claude":
             return self._call_claude(prompt)
+        elif self.provider in ["Groq (Llama/Gemma)", "OpenRouter (Modelos Libres)"]:
+            return self._call_openai_compatible(prompt)
         else:
             raise ValueError(f"Proveedor no soportado: {self.provider}")
 
@@ -155,7 +175,6 @@ class AIService:
         except Exception as e:
             logger.error(f"Error en Gemini estructurado: {e}")
             if search_grounding:
-                # Fallback to general JSON format if grounding tools conflict with response_schema
                 logger.info("Reintentando sin esquema estricto por grounding...")
                 fallback_prompt = prompt + "\nDevuelve el resultado estrictamente en formato JSON válido conforme al siguiente esquema:\n" + json.dumps(QuizQuestionsList.schema(), indent=2)
                 model = genai.GenerativeModel(model_name=self.model_name, tools=tools)
@@ -187,11 +206,8 @@ class AIService:
                     {"role": "user", "content": prompt}
                 ]
             )
-            
-            # Extract content from response text block
             text_content = response.content[0].text.strip()
             
-            # If the response contains markdown blocks, strip them
             if text_content.startswith("```json"):
                 text_content = text_content[7:]
             if text_content.endswith("```"):
@@ -202,4 +218,46 @@ class AIService:
             return data.get("questions", [])
         except Exception as e:
             logger.error(f"Error al llamar a Anthropic Claude: {e}")
+            raise e
+
+    def _call_openai_compatible(self, prompt: str) -> List[Dict[str, Any]]:
+        if openai is None:
+            raise ImportError("Instala 'openai' para usar este proveedor.")
+            
+        system_instruction = f"""
+        Eres un generador de cuestionarios educativos experto. 
+        Debes responder EXCLUSIVAMENTE con un objeto JSON que contenga una clave 'questions' con una lista de objetos de tipo pregunta.
+        El esquema JSON debe ser exactamente el siguiente:
+        {json.dumps(QuizQuestionsList.schema(), indent=2)}
+        Asegúrate de no agregar texto introductorio ni conclusiones adicionales, solo devuelve el bloque JSON.
+        """
+        
+        try:
+            logger.info(f"Llamando a {self.provider} ({self.model_name})...")
+            
+            # For Groq, we can enforce JSON mode
+            response_format = {"type": "json_object"} if self.provider == "Groq (Llama/Gemma)" else None
+            
+            response = self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                response_format=response_format
+            )
+            
+            text_content = response.choices[0].message.content.strip()
+            
+            if text_content.startswith("```json"):
+                text_content = text_content[7:]
+            if text_content.endswith("```"):
+                text_content = text_content[:-3]
+            text_content = text_content.strip()
+            
+            data = json.loads(text_content)
+            return data.get("questions", [])
+        except Exception as e:
+            logger.error(f"Error al llamar a {self.provider}: {e}")
             raise e

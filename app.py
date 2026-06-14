@@ -147,11 +147,6 @@ custom_css = """
         font-size: 0.9rem;
         margin-top: 0.75rem;
     }
-    
-    /* Sidebar styling refinement */
-    .css-1639g78 {
-        background-color: #f9fafb;
-    }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -178,8 +173,20 @@ def save_config(config):
     except Exception:
         return False
 
-# Cargar API Keys guardadas
+# Cargar API Keys locales
 saved_config = load_config()
+
+# Helper para cargar llave priorizando Streamlit Secrets (nube) y luego config.json (local)
+def get_initial_key(key_name, local_dict):
+    # Intentar obtener de Streamlit Secrets (en la nube)
+    if hasattr(st, "secrets"):
+        try:
+            if key_name in st.secrets:
+                return st.secrets[key_name]
+        except Exception:
+            pass
+    # Si no, obtener del archivo local
+    return local_dict.get(key_name, "")
 
 # Inicialización del estado de sesión
 if "questions" not in st.session_state:
@@ -187,9 +194,13 @@ if "questions" not in st.session_state:
 if "extracted_text" not in st.session_state:
     st.session_state.extracted_text = ""
 if "gemini_key" not in st.session_state:
-    st.session_state.gemini_key = saved_config.get("gemini_key", "")
+    st.session_state.gemini_key = get_initial_key("gemini_key", saved_config)
 if "claude_key" not in st.session_state:
-    st.session_state.claude_key = saved_config.get("claude_key", "")
+    st.session_state.claude_key = get_initial_key("claude_key", saved_config)
+if "groq_key" not in st.session_state:
+    st.session_state.groq_key = get_initial_key("groq_key", saved_config)
+if "openrouter_key" not in st.session_state:
+    st.session_state.openrouter_key = get_initial_key("openrouter_key", saved_config)
 
 # Cabecera / Hero Banner
 st.markdown("""
@@ -208,16 +219,25 @@ with st.sidebar:
     # Selector de Proveedor
     provider = st.selectbox(
         "Proveedor de IA:",
-        options=["Google Gemini", "Anthropic Claude"],
+        options=[
+            "Google Gemini", 
+            "Anthropic Claude", 
+            "Groq (Llama/Gemma)", 
+            "OpenRouter (Modelos Libres)"
+        ],
         index=0,
-        help="Elige el proveedor del modelo de lenguaje que deseas utilizar."
+        help="Elige el proveedor del modelo de lenguaje que deseas utilizar. Gemini, Groq y OpenRouter ofrecen planes gratuitos."
     )
     
     # Campo de texto dinámico de API Key sincronizado con session_state
     if provider == "Google Gemini":
         api_key_val = st.session_state.gemini_key
-    else:
+    elif provider == "Anthropic Claude":
         api_key_val = st.session_state.claude_key
+    elif provider == "Groq (Llama/Gemma)":
+        api_key_val = st.session_state.groq_key
+    else:  # OpenRouter
+        api_key_val = st.session_state.openrouter_key
         
     api_key = st.text_input(
         f"{provider} API Key:",
@@ -230,14 +250,20 @@ with st.sidebar:
     # Actualizar session_state
     if provider == "Google Gemini":
         st.session_state.gemini_key = api_key
-    else:
+    elif provider == "Anthropic Claude":
         st.session_state.claude_key = api_key
+    elif provider == "Groq (Llama/Gemma)":
+        st.session_state.groq_key = api_key
+    else:
+        st.session_state.openrouter_key = api_key
         
     # Botón para guardar las llaves en disco local
     if st.button("💾 Guardar API Keys localmente"):
         config_to_save = {
             "gemini_key": st.session_state.gemini_key,
-            "claude_key": st.session_state.claude_key
+            "claude_key": st.session_state.claude_key,
+            "groq_key": st.session_state.groq_key,
+            "openrouter_key": st.session_state.openrouter_key
         }
         if save_config(config_to_save):
             st.success("🔑 ¡Llaves guardadas correctamente en la computadora!")
@@ -246,18 +272,45 @@ with st.sidebar:
             
     st.divider()
     
+    # Links y opciones de modelos dinámicos
     if provider == "Google Gemini":
         st.markdown(
             "[🔑 Obtener Gemini API Key gratis en Google AI Studio](https://aistudio.google.com/)",
             unsafe_allow_html=True
         )
         model_options = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash"]
-    else:
+        
+    elif provider == "Anthropic Claude":
         st.markdown(
             "[🔑 Obtener Claude API Key en Anthropic Console](https://console.anthropic.com/)",
             unsafe_allow_html=True
         )
         model_options = ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"]
+        
+    elif provider == "Groq (Llama/Gemma)":
+        st.markdown(
+            "[🔑 Obtener Groq API Key gratis en Groq Console](https://console.groq.com/)",
+            unsafe_allow_html=True
+        )
+        model_options = [
+            "llama-3.1-70b-versatile", 
+            "llama-3.1-8b-instant", 
+            "gemma2-9b-it", 
+            "llama3-70b-8192", 
+            "llama3-8b-8192"
+        ]
+        
+    else:  # OpenRouter
+        st.markdown(
+            "[🔑 Obtener OpenRouter API Key gratis en OpenRouter.ai](https://openrouter.ai/)",
+            unsafe_allow_html=True
+        )
+        model_options = [
+            "meta-llama/llama-3-8b-instruct:free", 
+            "google/gemma-2-9b-it:free", 
+            "mistralai/mistral-7b-instruct:free", 
+            "microsoft/phi-3-medium-128k-instruct:free"
+        ]
         
     # Selección de modelo
     model_name = st.selectbox(
@@ -272,7 +325,7 @@ with st.sidebar:
     # Configuración de extracción/generación
     st.markdown("#### 🎯 Estrategia")
     mode = st.radio(
-        "Modo de operación:",
+        "Modo de operation:",
         options=["Extraer preguntas del documento", "Generar preguntas del tema"],
         index=0,
         help="Extraer: Busca preguntas escritas explícitamente en el documento.\nGenerar: Crea preguntas académicas nuevas sobre el tema del texto."
@@ -282,7 +335,7 @@ with st.sidebar:
     search_grounding = st.checkbox(
         "Habilitar búsqueda bibliográfica",
         value=True,
-        help="Google Gemini buscará fuentes bibliográficas reales en internet. Para Claude se utilizará su conocimiento integrado de libros académicos."
+        help="Google Gemini buscará fuentes reales en internet. Para el resto de proveedores se utilizará el conocimiento interno del modelo sobre libros académicos."
     )
     
     st.divider()
