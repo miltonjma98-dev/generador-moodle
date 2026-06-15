@@ -147,6 +147,18 @@ custom_css = """
         font-size: 0.9rem;
         margin-top: 0.75rem;
     }
+    
+    /* Panel de información de seguridad */
+    .security-notice {
+        background-color: #eff6ff;
+        border: 1px solid #bfdbfe;
+        padding: 0.75rem;
+        border-radius: 8px;
+        color: #1e40af;
+        font-size: 0.85rem;
+        margin-bottom: 1rem;
+        font-weight: 500;
+    }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -163,15 +175,6 @@ def load_config():
         except Exception:
             return {}
     return {}
-
-# Guardar configuración
-def save_config(config):
-    try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=4)
-        return True
-    except Exception:
-        return False
 
 # Cargar API Keys locales
 saved_config = load_config()
@@ -214,7 +217,14 @@ st.markdown("""
 
 # barra lateral para configuración
 with st.sidebar:
-    st.markdown("### ⚙️ Configuración de IA")
+    st.markdown("### 🔒 Configuración de IA Privada")
+    
+    st.markdown("""
+    <div class="security-notice">
+        🔒 <b>Modo Privado Activo</b><br>
+        Las claves de acceso API están protegidas en el servidor. No son visibles ni editables por los usuarios de este sitio.
+    </div>
+    """, unsafe_allow_html=True)
     
     # Selector de Proveedor
     provider = st.selectbox(
@@ -226,72 +236,33 @@ with st.sidebar:
             "OpenRouter (Modelos Libres)"
         ],
         index=0,
-        help="Elige el proveedor del modelo de lenguaje que deseas utilizar. Gemini, Groq y OpenRouter ofrecen planes gratuitos."
+        help="Elige el proveedor del modelo de lenguaje que deseas utilizar."
     )
     
-    # Campo de texto dinámico de API Key sincronizado con session_state
+    # Determinar si la llave está configurada internamente
+    active_key = ""
     if provider == "Google Gemini":
-        api_key_val = st.session_state.gemini_key
+        active_key = st.session_state.gemini_key
     elif provider == "Anthropic Claude":
-        api_key_val = st.session_state.claude_key
+        active_key = st.session_state.claude_key
     elif provider == "Groq (Llama/Gemma)":
-        api_key_val = st.session_state.groq_key
-    else:  # OpenRouter
-        api_key_val = st.session_state.openrouter_key
-        
-    api_key = st.text_input(
-        f"{provider} API Key:",
-        value=api_key_val,
-        type="password",
-        help=f"Clave API de {provider} necesaria para realizar las consultas.",
-        placeholder="Introduce tu clave..."
-    )
-    
-    # Actualizar session_state
-    if provider == "Google Gemini":
-        st.session_state.gemini_key = api_key
-    elif provider == "Anthropic Claude":
-        st.session_state.claude_key = api_key
-    elif provider == "Groq (Llama/Gemma)":
-        st.session_state.groq_key = api_key
+        active_key = st.session_state.groq_key
     else:
-        st.session_state.openrouter_key = api_key
+        active_key = st.session_state.openrouter_key
         
-    # Botón para guardar las llaves en disco local
-    if st.button("💾 Guardar API Keys localmente"):
-        config_to_save = {
-            "gemini_key": st.session_state.gemini_key,
-            "claude_key": st.session_state.claude_key,
-            "groq_key": st.session_state.groq_key,
-            "openrouter_key": st.session_state.openrouter_key
-        }
-        if save_config(config_to_save):
-            st.success("🔑 ¡Llaves guardadas correctamente en la computadora!")
-        else:
-            st.error("❌ No se pudo guardar la configuración.")
-            
+    if active_key:
+        st.success(f"🟢 {provider} conectado y listo.")
+    else:
+        st.warning(f"⚠️ {provider} no tiene clave configurada en el servidor.")
+        
     st.divider()
     
-    # Links y opciones de modelos dinámicos
+    # Modelos dinámicos
     if provider == "Google Gemini":
-        st.markdown(
-            "[🔑 Obtener Gemini API Key gratis en Google AI Studio](https://aistudio.google.com/)",
-            unsafe_allow_html=True
-        )
         model_options = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash"]
-        
     elif provider == "Anthropic Claude":
-        st.markdown(
-            "[🔑 Obtener Claude API Key en Anthropic Console](https://console.anthropic.com/)",
-            unsafe_allow_html=True
-        )
         model_options = ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"]
-        
     elif provider == "Groq (Llama/Gemma)":
-        st.markdown(
-            "[🔑 Obtener Groq API Key gratis en Groq Console](https://console.groq.com/)",
-            unsafe_allow_html=True
-        )
         model_options = [
             "llama-3.1-70b-versatile", 
             "llama-3.1-8b-instant", 
@@ -299,12 +270,7 @@ with st.sidebar:
             "llama3-70b-8192", 
             "llama3-8b-8192"
         ]
-        
     else:  # OpenRouter
-        st.markdown(
-            "[🔑 Obtener OpenRouter API Key gratis en OpenRouter.ai](https://openrouter.ai/)",
-            unsafe_allow_html=True
-        )
         model_options = [
             "meta-llama/llama-3-8b-instruct:free", 
             "google/gemma-2-9b-it:free", 
@@ -325,7 +291,7 @@ with st.sidebar:
     # Configuración de extracción/generación
     st.markdown("#### 🎯 Estrategia")
     mode = st.radio(
-        "Modo de operation:",
+        "Modo de operación:",
         options=["Extraer preguntas del documento", "Generar preguntas del tema"],
         index=0,
         help="Extraer: Busca preguntas escritas explícitamente en el documento.\nGenerar: Crea preguntas académicas nuevas sobre el tema del texto."
@@ -334,8 +300,8 @@ with st.sidebar:
     # Habilitar referencias de libros (búsqueda en internet)
     search_grounding = st.checkbox(
         "Habilitar búsqueda bibliográfica",
-        value=True,
-        help="Google Gemini buscará fuentes reales en internet. Para el resto de proveedores se utilizará el conocimiento interno del modelo sobre libros académicos."
+        value=False,
+        help="Solo disponible para Google Gemini. Busca fuentes reales en internet. Desactívala si te arroja errores de límite de API."
     )
     
     st.divider()
@@ -360,8 +326,8 @@ with col1:
     process_btn = st.button("🚀 Procesar Documento", use_container_width=True)
     
     if process_btn:
-        if not api_key:
-            st.error(f"⚠️ Por favor, ingresa tu {provider} API Key en la barra lateral.")
+        if not active_key:
+            st.error(f"⚠️ El proveedor '{provider}' no está configurado. El administrador de la web debe ingresar las claves API en Streamlit Secrets.")
         elif not uploaded_file:
             st.error("⚠️ Por favor, sube un documento primero.")
         else:
@@ -378,9 +344,9 @@ with col1:
                     extracted_text = None
             
             if extracted_text:
-                with st.spinner(f"La IA ({provider}) está analizando las preguntas y buscando bibliografía real..."):
+                with st.spinner(f"La IA ({provider}) está analizando las preguntas..."):
                     try:
-                        service = AIService(provider=provider, api_key=api_key, model_name=model_name)
+                        service = AIService(provider=provider, api_key=active_key, model_name=model_name)
                         
                         # Call API to generate/extract
                         generate_new = (mode == "Generar preguntas del tema")

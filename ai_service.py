@@ -1,7 +1,6 @@
 import json
 import logging
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -25,23 +24,68 @@ except ImportError:
     openai = None
 
 
-class AnswerOption(BaseModel):
-    text: str = Field(description="Texto de la opción de respuesta.")
-    fraction: float = Field(description="Fracción de la calificación. Debe ser 100 para la opción correcta, y 0 para las incorrectas.")
-    feedback: str = Field(description="Retroalimentación específica de por qué esta opción es correcta o incorrecta.")
-
-
-class QuizQuestion(BaseModel):
-    type: str = Field(description="Tipo de pregunta. Debe ser 'multichoice' (opción múltiple) o 'essay' (abierta/ensayo).")
-    name: str = Field(description="Título corto o nombre identificador de la pregunta (ej. 'Fotosíntesis - Importancia').")
-    questiontext: str = Field(description="El enunciado o pregunta completa. Debe ser clara y descriptiva.")
-    generalfeedback: str = Field(description="Retroalimentación general y detallada de la pregunta. Si el documento original no la tiene, se autogenera explicando la respuesta correcta e incluyendo referencias bibliográficas reales (Libro, Autor, Año) obtenidas de fuentes académicas confiables.")
-    answers: Optional[List[AnswerOption]] = Field(default=None, description="Lista de opciones de respuesta. Obligatorio y debe tener al menos 4 opciones únicamente si el type es 'multichoice'. Para 'essay', dejar vacío.")
-    graderinfo: Optional[str] = Field(default=None, description="Criterios de evaluación e información para el calificador. Obligatorio únicamente si el type es 'essay'. Para 'multichoice', dejar vacío.")
-
-
-class QuizQuestionsList(BaseModel):
-    questions: List[QuizQuestion]
+# Definimos el esquema de respuesta compatible con Gemini en formato diccionario nativo.
+# Evitamos usar Pydantic directamente para el schema de Gemini porque Pydantic v2 genera 
+# campos como 'default' o 'anyOf' que no son soportados por la API de Gemini y provocan 
+# el error "Unknown field for Schema: default".
+GEMINI_QUIZ_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "questions": {
+            "type": "ARRAY",
+            "description": "Lista de preguntas generadas o extraídas del documento.",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "type": {
+                        "type": "STRING",
+                        "description": "Tipo de pregunta. Debe ser estrictamente 'multichoice' (opción múltiple) o 'essay' (abierta/ensayo)."
+                    },
+                    "name": {
+                        "type": "STRING",
+                        "description": "Título corto identificativo de la pregunta (ej. 'Fotosíntesis - Fase Luminosa')."
+                    },
+                    "questiontext": {
+                        "type": "STRING",
+                        "description": "El enunciado completo de la pregunta. Puede contener formato HTML básico."
+                    },
+                    "generalfeedback": {
+                        "type": "STRING",
+                        "description": "Retroalimentación general y detallada de la pregunta. Se autogenera explicando la respuesta correcta e incluyendo referencias bibliográficas reales (Libro, Autor, Año) obtenidas de fuentes académicas confiables."
+                    },
+                    "answers": {
+                        "type": "ARRAY",
+                        "description": "Lista de opciones de respuesta. Obligatorio y debe tener al menos 4 opciones únicamente si el type es 'multichoice'. Para 'essay', omitir.",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "text": {
+                                    "type": "STRING",
+                                    "description": "Texto de la opción de respuesta."
+                                },
+                                "fraction": {
+                                    "type": "NUMBER",
+                                    "description": "Fracción de la calificación. Debe ser 100 para la opción correcta y 0 para las incorrectas."
+                                },
+                                "feedback": {
+                                    "type": "STRING",
+                                    "description": "Retroalimentación específica de por qué esta opción es correcta o incorrecta."
+                                }
+                            },
+                            "required": ["text", "fraction", "feedback"]
+                        }
+                    },
+                    "graderinfo": {
+                        "type": "STRING",
+                        "description": "Criterios de evaluación clave e información para el calificador. Obligatorio únicamente si el type es 'essay'. Para 'multichoice', omitir."
+                    }
+                },
+                "required": ["type", "name", "questiontext", "generalfeedback"]
+            }
+        }
+    },
+    "required": ["questions"]
+}
 
 
 class AIService:
@@ -159,9 +203,10 @@ class AIService:
         if genai is None:
             raise ImportError("Instala 'google-generativeai' para usar Google Gemini.")
             
+        # Generar configuración con el esquema en formato dict nativo libre de campos 'default'
         config = GenerationConfig(
             response_mime_type="application/json",
-            response_schema=QuizQuestionsList,
+            response_schema=GEMINI_QUIZ_SCHEMA,
             temperature=0.2,
         )
         
@@ -176,7 +221,7 @@ class AIService:
             logger.error(f"Error en Gemini estructurado: {e}")
             if search_grounding:
                 logger.info("Reintentando sin esquema estricto por grounding...")
-                fallback_prompt = prompt + "\nDevuelve el resultado estrictamente en formato JSON válido conforme al siguiente esquema:\n" + json.dumps(QuizQuestionsList.schema(), indent=2)
+                fallback_prompt = prompt + "\nDevuelve el resultado estrictamente en formato JSON válido conforme al siguiente esquema:\n" + json.dumps(GEMINI_QUIZ_SCHEMA, indent=2)
                 model = genai.GenerativeModel(model_name=self.model_name, tools=tools)
                 response = model.generate_content(fallback_prompt, generation_config=GenerationConfig(response_mime_type="application/json"))
                 data = json.loads(response.text)
@@ -191,7 +236,7 @@ class AIService:
         Eres un generador de cuestionarios educativos experto. 
         Debes responder EXCLUSIVAMENTE con un objeto JSON que contenga una clave 'questions' con una lista de objetos de tipo pregunta.
         El esquema JSON debe ser exactamente el siguiente:
-        {json.dumps(QuizQuestionsList.schema(), indent=2)}
+        {json.dumps(GEMINI_QUIZ_SCHEMA, indent=2)}
         Asegúrate de no agregar texto introductorio ni conclusiones adicionales, solo devuelve el bloque JSON.
         """
         
@@ -228,14 +273,14 @@ class AIService:
         Eres un generador de cuestionarios educativos experto. 
         Debes responder EXCLUSIVAMENTE con un objeto JSON que contenga una clave 'questions' con una lista de objetos de tipo pregunta.
         El esquema JSON debe ser exactamente el siguiente:
-        {json.dumps(QuizQuestionsList.schema(), indent=2)}
+        {json.dumps(GEMINI_QUIZ_SCHEMA, indent=2)}
         Asegúrate de no agregar texto introductorio ni conclusiones adicionales, solo devuelve el bloque JSON.
         """
         
         try:
             logger.info(f"Llamando a {self.provider} ({self.model_name})...")
             
-            # For Groq, we can enforce JSON mode
+            # En Groq forzamos modo JSON
             response_format = {"type": "json_object"} if self.provider == "Groq (Llama/Gemma)" else None
             
             response = self.openai_client.chat.completions.create(
