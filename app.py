@@ -270,12 +270,12 @@ with st.sidebar:
             "llama3-70b-8192", 
             "llama3-8b-8192"
         ]
-    else:  # OpenRouter
+    else:  # OpenRouter (Usa modelos libres y estables actualmente activos)
         model_options = [
             "meta-llama/llama-3-8b-instruct:free", 
             "google/gemma-2-9b-it:free", 
-            "mistralai/mistral-7b-instruct:free", 
-            "microsoft/phi-3-medium-128k-instruct:free"
+            "qwen/qwen-2.5-72b-instruct:free",
+            "mistralai/mistral-7b-instruct:free"
         ]
         
     # Selección de modelo
@@ -327,31 +327,35 @@ with col1:
     
     if process_btn:
         if not active_key:
-            st.error(f"⚠️ El proveedor '{provider}' no está configurado. El administrador de la web debe ingresar las claves API en Streamlit Secrets.")
+            st.error(f"⚠️ El proveedor '{provider}' no está configurado. El administrador de la web debe ingresar las claves API en Streamlit Secrets o config.json.")
         elif not uploaded_file:
             st.error("⚠️ Por favor, sube un documento primero.")
         else:
+            file_bytes = uploaded_file.read()
+            file_name = uploaded_file.name
+            
             with st.spinner("Leyendo y extrayendo texto del documento..."):
                 try:
-                    file_bytes = uploaded_file.read()
-                    file_name = uploaded_file.name
+                    # Extraer texto (sirve de fallback y para Word/PPTX)
                     extracted_text = extract_text(file_bytes, file_name)
                     st.session_state.extracted_text = extracted_text
                     
-                    st.success("✅ Texto extraído correctamente. Iniciando análisis de IA...")
+                    st.success("✅ Documento leído correctamente. Iniciando análisis de IA...")
                 except Exception as e:
                     st.error(f"Error al leer el archivo: {str(e)}")
                     extracted_text = None
             
-            if extracted_text:
+            if extracted_text is not None:
                 with st.spinner(f"La IA ({provider}) está analizando las preguntas..."):
                     try:
                         service = AIService(provider=provider, api_key=active_key, model_name=model_name)
                         
-                        # Call API to generate/extract
+                        # Generar/extraer preguntas pasando el archivo original (para lectura directa de PDF)
                         generate_new = (mode == "Generar preguntas del tema")
                         questions = service.generate_quiz(
-                            text_content=extracted_text[:40000],  # Limit character length to fit context if very large
+                            text_content=extracted_text[:40000],
+                            file_bytes=file_bytes,
+                            file_name=file_name,
                             question_type=question_type,
                             search_grounding=search_grounding,
                             generate_new_questions=generate_new

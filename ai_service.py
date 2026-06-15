@@ -1,5 +1,6 @@
 import json
 import logging
+import base64
 from typing import List, Dict, Any, Optional
 
 # Setup logging
@@ -24,10 +25,7 @@ except ImportError:
     openai = None
 
 
-# Definimos el esquema de respuesta compatible con Gemini en formato diccionario nativo.
-# Evitamos usar Pydantic directamente para el schema de Gemini porque Pydantic v2 genera 
-# campos como 'default' o 'anyOf' que no son soportados por la API de Gemini y provocan 
-# el error "Unknown field for Schema: default".
+# Esquema de respuesta compatible con Gemini en formato diccionario nativo.
 GEMINI_QUIZ_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -47,7 +45,7 @@ GEMINI_QUIZ_SCHEMA = {
                     },
                     "questiontext": {
                         "type": "STRING",
-                        "description": "El enunciado completo de la pregunta. Puede contener formato HTML básico."
+                        "description": "El enunciado completo de la pregunta. Puede contener formato HTML básico y fórmulas matemáticas."
                     },
                     "generalfeedback": {
                         "type": "STRING",
@@ -127,12 +125,16 @@ class AIService:
     def generate_quiz(
         self, 
         text_content: str, 
+        file_bytes: Optional[bytes] = None,
+        file_name: Optional[str] = None,
         question_type: str = "Ambas", 
-        search_grounding: bool = True,
+        search_grounding: bool = False,
         generate_new_questions: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Uses the selected provider to parse text and return structured questions.
+        If a PDF file is provided, Gemini and Claude will read the document bytes directly
+        for high-fidelity mathematical and structural recognition.
         """
         type_instruction = ""
         if question_type == "Opción Múltiple":
@@ -145,23 +147,20 @@ class AIService:
         behavior_instruction = ""
         if generate_new_questions:
             behavior_instruction = (
-                "Tu objetivo es GENERAR preguntas NUEVAS y educativas basadas en la información y conceptos clave explicados "
-                "en el texto provisto. Asegúrate de cubrir todos los temas relevantes."
+                "Tu objetivo es GENERAR preguntas NUEVAS y educativas basadas en la información, fórmulas matemáticas, "
+                "problemas físicos y conceptos clave explicados en el documento. Asegúrate de procesar todo el contenido."
             )
         else:
             behavior_instruction = (
-                "Tu objetivo es DETECTAR y EXTRAER las preguntas y respuestas que ya existen explícitamente en el texto provisto. "
-                "Si encuentras una pregunta de opción múltiple, extrae todas sus opciones. Si una pregunta está incompleta o no tiene "
-                "retroalimentación, complétala de forma coherente utilizando el contenido del texto."
+                "Tu objetivo es DETECTAR y EXTRAER todas las preguntas y respuestas que ya existen explícitamente en el documento. "
+                "Es crítico que extraigas TODAS las preguntas que encuentres (sin importar si son 10, 20 o más). "
+                "Si una pregunta contiene fórmulas matemáticas o problemas de física, extrae el enunciado exacto y sus opciones correspondientes. "
+                "Si una pregunta está incompleta o no tiene retroalimentación, complétala de forma coherente utilizando el contenido del texto."
             )
 
         prompt = f"""
         Actúa como un experto creador de exámenes y docente.
-        Analiza el siguiente contenido de texto extraído de un documento escolar o académico:
-        
-        === CONTENIDO DEL DOCUMENTO ===
-        {text_content}
-        ===============================
+        Analiza el documento escolar o académico provisto.
         
         {behavior_instruction}
         
@@ -188,22 +187,31 @@ class AIService:
         if search_grounding and self.provider == "Google Gemini":
             prompt += "\nUtiliza tu herramienta de búsqueda en Google (Google Search) para encontrar referencias bibliográficas académicas reales y libros existentes que sirvan de fuente para el tema de las preguntas generadas, e incorpóralas en la retroalimentación."
         else:
-            prompt += "\nUtiliza tu conocimiento interno actualizado para buscar y citar libros de texto reales e importantes de la disciplina académica como fuente para las preguntas."
+            prompt += "\nUtiliza tu conocimiento interno actualizado para buscar y citar libros de texto reales e importantes de la de la disciplina (Física, Matemáticas, Química, etc.) como fuente para las preguntas."
 
         if self.provider == "Google Gemini":
-            return self._call_gemini(prompt, search_grounding)
+            return self._call_gemini(prompt, search_grounding, file_bytes, file_name, text_content)
         elif self.provider == "Anthropic Claude":
-            return self._call_claude(prompt)
+            return self._call_claude(prompt, file_bytes, file_name, text_content)
         elif self.provider in ["Groq (Llama/Gemma)", "OpenRouter (Modelos Libres)"]:
-            return self._call_openai_compatible(prompt)
+            # Groq y OpenRouter no soportan archivos directamente, usamos el texto extraído
+            # Si el texto está vacío, usamos una advertencia
+            full_prompt = prompt + f"\n\n=== TEXTO DEL DOCUMENTO ===\n{text_content}\n=========================="
+            return self._call_openai_compatible(full_prompt)
         else:
             raise ValueError(f"Proveedor no soportado: {self.provider}")
 
-    def _call_gemini(self, prompt: str, search_grounding: bool) -> List[Dict[str, Any]]:
+    def _call_gemini(
+        self, 
+        prompt: str, 
+        search_grounding: bool, 
+        file_bytes: Optional[bytes], 
+        file_name: Optional[str], 
+        text_content: str
+    ) -> List[Dict[str, Any]]:
         if genai is None:
             raise ImportError("Instala 'google-generativeai' para usar Google Gemini.")
             
-        # Generar configuración con el esquema en formato dict nativo libre de campos 'default'
         config = GenerationConfig(
             response_mime_type="application/json",
             response_schema=GEMINI_QUIZ_SCHEMA,
@@ -212,9 +220,27 @@ class AIService:
         
         tools = ["google_search_retrieval"] if search_grounding else None
         
+        # Si es un PDF, lo mandamos directamente a la API de Gemini como datos binarios (multimodal)
+        # Esto permite que Gemini use su propio lector visual de PDF y reconozca fórmulas matemáticas y diseños complejos perfectamente.
+        if file_bytes and file_name and file_name.lower().endswith(".pdf"):
+            logger.info("Enviando archivo PDF de forma directa a la API de Gemini (Lector Multimodal)...")
+            contents = [
+                {
+                    "mime_type": "application/pdf",
+                    "data": file_bytes
+                },
+                prompt
+            ]
+        else:
+            # Si no es PDF, pasamos el texto extraído
+            logger.info("Enviando texto extraído a la API de Gemini...")
+            contents = [
+                f"{prompt}\n\n=== TEXTO DEL DOCUMENTO ===\n{text_content}\n=========================="
+            ]
+        
         try:
             model = genai.GenerativeModel(model_name=self.model_name, tools=tools)
-            response = model.generate_content(prompt, generation_config=config)
+            response = model.generate_content(contents, generation_config=config)
             data = json.loads(response.text)
             return data.get("questions", [])
         except Exception as e:
@@ -222,13 +248,25 @@ class AIService:
             if search_grounding:
                 logger.info("Reintentando sin esquema estricto por grounding...")
                 fallback_prompt = prompt + "\nDevuelve el resultado estrictamente en formato JSON válido conforme al siguiente esquema:\n" + json.dumps(GEMINI_QUIZ_SCHEMA, indent=2)
+                
+                if file_bytes and file_name and file_name.lower().endswith(".pdf"):
+                    contents_fallback = [{"mime_type": "application/pdf", "data": file_bytes}, fallback_prompt]
+                else:
+                    contents_fallback = [fallback_prompt + f"\n\n=== TEXTO DEL DOCUMENTO ===\n{text_content}"]
+                    
                 model = genai.GenerativeModel(model_name=self.model_name, tools=tools)
-                response = model.generate_content(fallback_prompt, generation_config=GenerationConfig(response_mime_type="application/json"))
+                response = model.generate_content(contents_fallback, generation_config=GenerationConfig(response_mime_type="application/json"))
                 data = json.loads(response.text)
                 return data.get("questions", [])
             raise e
 
-    def _call_claude(self, prompt: str) -> List[Dict[str, Any]]:
+    def _call_claude(
+        self, 
+        prompt: str, 
+        file_bytes: Optional[bytes], 
+        file_name: Optional[str], 
+        text_content: str
+    ) -> List[Dict[str, Any]]:
         if anthropic is None:
             raise ImportError("Instala 'anthropic' para usar Anthropic Claude.")
             
@@ -240,6 +278,32 @@ class AIService:
         Asegúrate de no agregar texto introductorio ni conclusiones adicionales, solo devuelve el bloque JSON.
         """
         
+        # Configurar el mensaje para Claude
+        message_content = []
+        
+        # Claude 3.5 Sonnet soporta carga directa de PDF en formato base64
+        if file_bytes and file_name and file_name.lower().endswith(".pdf"):
+            logger.info("Enviando archivo PDF de forma directa a Claude (Lector Multimodal)...")
+            pdf_base64 = base64.b64encode(file_bytes).decode("utf-8")
+            message_content.append({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": pdf_base64
+                }
+            })
+            message_content.append({
+                "type": "text",
+                "text": prompt
+            })
+        else:
+            logger.info("Enviando texto extraído a Claude...")
+            message_content.append({
+                "type": "text",
+                "text": f"{prompt}\n\n=== TEXTO DEL DOCUMENTO ===\n{text_content}\n=========================="
+            })
+        
         try:
             logger.info(f"Llamando a la API de Claude ({self.model_name})...")
             response = self.claude_client.messages.create(
@@ -248,18 +312,18 @@ class AIService:
                 temperature=0.2,
                 system=system_instruction,
                 messages=[
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": message_content}
                 ]
             )
-            text_content = response.content[0].text.strip()
+            text_content_resp = response.content[0].text.strip()
             
-            if text_content.startswith("```json"):
-                text_content = text_content[7:]
-            if text_content.endswith("```"):
-                text_content = text_content[:-3]
-            text_content = text_content.strip()
+            if text_content_resp.startswith("```json"):
+                text_content_resp = text_content_resp[7:]
+            if text_content_resp.endswith("```"):
+                text_content_resp = text_content_resp[:-3]
+            text_content_resp = text_content_resp.strip()
             
-            data = json.loads(text_content)
+            data = json.loads(text_content_resp)
             return data.get("questions", [])
         except Exception as e:
             logger.error(f"Error al llamar a Anthropic Claude: {e}")
